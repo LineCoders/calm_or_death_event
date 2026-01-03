@@ -1,13 +1,18 @@
 package my_mod;
 
-import net.minecraft.server.MinecraftServer;
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.advancement.AdvancementEntry;
+import net.minecraft.advancement.AdvancementProgress;
 import net.minecraft.scoreboard.*;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import net.minecraft.util.Identifier;
 
 public class Calm_or_death implements ModInitializer {
 	public static final String SCOREBOARD_ID = "event_points";
@@ -16,6 +21,26 @@ public class Calm_or_death implements ModInitializer {
 	public void onInitialize() {
 		System.out.println("Мод Командного Ивента загружается!");
 		ModItems.registerModItems();
+
+		FirstBloodHandler.register();
+
+		// === КОМАНДА /newtarget ===
+		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+			dispatcher.register(CommandManager.literal("newtarget")
+					.executes(context -> {
+						ServerPlayerEntity player = context.getSource().getPlayer();
+						if (player != null) {
+							AbstractTeam team = player.getScoreboardTeam();
+							if (team != null) {
+								ContractManager.reRollContractForTeam(context.getSource().getServer(), team.getName());
+								context.getSource().sendFeedback(() -> Text.literal("✅ Контракт обновлен принудительно!").formatted(Formatting.GREEN), false);
+							} else {
+								context.getSource().sendFeedback(() -> Text.literal("❌ Вы не в команде!").formatted(Formatting.RED), false);
+							}
+						}
+						return 1;
+					}));
+		});
 
 		// 1. СОЗДАНИЕ ТАБЛИЦЫ
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
@@ -26,67 +51,82 @@ public class Calm_or_death implements ModInitializer {
 				objective = scoreboard.addObjective(
 						SCOREBOARD_ID,
 						ScoreboardCriterion.DUMMY,
+						// Убрал Bold
 						Text.literal("Баллы Команд").formatted(Formatting.GOLD),
 						ScoreboardCriterion.RenderType.INTEGER,
 						true,
 						null
 				);
 			}
-			// Показываем сбоку, чтобы все видели счет команд
 			scoreboard.setObjectiveSlot(ScoreboardDisplaySlot.SIDEBAR, objective);
+
+			ContractManager.reRollAllContracts(server);
 		});
 
-		// 2. ЛОГИКА СМЕРТИ И УБИЙСТВ
-		ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
-			// 1. Проверяем, что умер именно ИГРОК
-			if (entity instanceof ServerPlayerEntity victim) {
+		// 2. ТИКЕР (АЧИВКИ + КОНТРАКТЫ)
+		ServerTickEvents.END_SERVER_TICK.register(server -> {
 
-				MinecraftServer server = victim.getEntityWorld().getServer();
-				if (server == null) return;
+			ContractManager.tick(server);
 
-				Scoreboard scoreboard = server.getScoreboard();
-				ScoreboardObjective objective = scoreboard.getNullableObjective(SCOREBOARD_ID);
-				if (objective == null) return; // Если скорборда нет, ничего не делаем
+			// ПРОВЕРКА АЧИВОК
+			if (server.getTicks() % 20 == 0) {
+				for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
 
-				AbstractTeam victimTeam = victim.getScoreboardTeam();
-
-				// === ЧАСТЬ 1: ШТРАФ ЗА СМЕРТЬ (Работает всегда: /kill, лава, мобы) ===
-				if (victimTeam != null) {
-					String vTeamName = victimTeam.getName();
-					ScoreHolder vHolder = ScoreHolder.fromName(vTeamName);
-					ScoreAccess vScore = scoreboard.getOrCreateScore(vHolder, objective);
-
-					// Вычитаем 5 очков
-					vScore.setScore(vScore.getScore() - 5);
-					victim.sendMessage(Text.literal("Ваша команда потеряла 5 очков за смерть.").formatted(Formatting.RED), true);
-				}
-
-				// === ЧАСТЬ 2: НАГРАДА ЗА УБИЙСТВО (Только если убил Игрок) ===
-				if (source.getAttacker() instanceof ServerPlayerEntity killer) {
-					AbstractTeam killerTeam = killer.getScoreboardTeam();
-
-					if (killerTeam != null) {
-						// Проверка на огонь по своим
-						if (killerTeam.isEqual(victimTeam)) {
-							killer.sendMessage(Text.literal("За убийство союзника очки не даются!").formatted(Formatting.RED), true);
-							return;
-						}
-
-						String kTeamName = killerTeam.getName();
-						ScoreHolder kHolder = ScoreHolder.fromName(kTeamName);
-						ScoreAccess kScore = scoreboard.getOrCreateScore(kHolder, objective);
-
-						// Прибавляем 10 очков
-						kScore.setScore(kScore.getScore() + 10);
-
-						// Оповещение (опционально можно убрать broadcast, если спамит)
-						server.getPlayerManager().broadcast(
-								Text.literal("Команда " + kTeamName + " выбила игрока команды " + (victimTeam != null ? victimTeam.getName() : "Без команды") + "!").formatted(Formatting.GREEN),
-								false
-						);
-					}
+					// Ачивки (твой список)
+					checkRaceAdvancement(server, player, "minecraft:story/mine_stone", 10, "Каменный век");
+					checkRaceAdvancement(server, player, "minecraft:adventure/kill_a_mob", 15, "Охотник на монстров");
+					checkRaceAdvancement(server, player, "minecraft:story/enter_the_nether", 20, "Огненные недра");
+					checkRaceAdvancement(server, player, "minecraft:end/kill_dragon", 100, "Освободи Энд");
 				}
 			}
 		});
+	}
+
+	// --- МЕТОД ПРОВЕРКИ АЧИВОК (Без жирного текста) ---
+	private void checkRaceAdvancement(MinecraftServer server, ServerPlayerEntity player, String advancementId, int points, String eventName) {
+		String[] parts = advancementId.split(":");
+		if (parts.length != 2) return;
+
+		Identifier id = Identifier.of(parts[0], parts[1]);
+		AdvancementEntry advancement = server.getAdvancementLoader().get(id);
+
+		if (advancement == null) return;
+
+		AdvancementProgress progress = player.getAdvancementTracker().getProgress(advancement);
+
+		if (progress.isDone()) {
+
+			String trackingName = "#done_" + id.getPath().replace("/", "_");
+			Scoreboard scoreboard = server.getScoreboard();
+			ScoreboardObjective objective = scoreboard.getNullableObjective(SCOREBOARD_ID);
+			if (objective == null) return;
+
+			ScoreHolder trackerHolder = ScoreHolder.fromName(trackingName);
+			ScoreAccess trackerScore = scoreboard.getOrCreateScore(trackerHolder, objective);
+
+			if (trackerScore.getScore() > 0) return;
+
+			AbstractTeam team = player.getScoreboardTeam();
+			if (team != null) {
+				trackerScore.setScore(1);
+
+				String teamName = team.getName();
+				ScoreHolder teamHolder = ScoreHolder.fromName(teamName);
+				ScoreAccess teamScore = scoreboard.getOrCreateScore(teamHolder, objective);
+				teamScore.setScore(teamScore.getScore() + points);
+
+				// Сообщение (Убрал жирный текст в последней строке)
+				server.getPlayerManager().broadcast(
+						Text.literal("Команда ").formatted(Formatting.GRAY)
+								.append(Text.literal(teamName).formatted(Formatting.GOLD))
+								.append(Text.literal(" выполнила достижение ").formatted(Formatting.GRAY))
+								.append(Text.literal("\"" + eventName + "\"").formatted(Formatting.GOLD))
+								.append(Text.literal(" и получила ").formatted(Formatting.GRAY))
+								// Здесь был BOLD, теперь просто GOLD
+								.append(Text.literal(points + " очков!").formatted(Formatting.GOLD)),
+						false
+				);
+			}
+		}
 	}
 }

@@ -1,6 +1,6 @@
 {
   "parent": "item/generated",
   "textures": {
-    "layer0": "calm_or_death:rune_75"
+    "layer0": "calm_or_death:item/rune_75"
   }
 }
