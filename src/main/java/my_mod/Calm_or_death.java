@@ -7,17 +7,13 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.advancement.AdvancementEntry;
 import net.minecraft.advancement.AdvancementProgress;
-import net.minecraft.registry.Registry;
 import net.minecraft.scoreboard.*;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.sound.SoundEvent;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
-
-import static net.fabricmc.loader.impl.FabricLoaderImpl.MOD_ID;
 
 public class Calm_or_death implements ModInitializer {
 	public static final String SCOREBOARD_ID = "event_points";
@@ -26,7 +22,7 @@ public class Calm_or_death implements ModInitializer {
 	public void onInitialize() {
 		System.out.println("Мод Командного Ивента загружается!");
 		ModItems.registerModItems();
-
+		LootTableModifier.registerModifications();
 		FirstBloodHandler.register();
 
 		// === 1. КОМАНДА /newtarget ===
