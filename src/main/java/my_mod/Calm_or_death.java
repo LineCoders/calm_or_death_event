@@ -4,7 +4,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents; // ВАЖНЫЙ ИМПОРТ ДЛЯ ВХОДА
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.advancement.AdvancementEntry;
 import net.minecraft.advancement.AdvancementProgress;
 import net.minecraft.scoreboard.*;
@@ -25,7 +25,7 @@ public class Calm_or_death implements ModInitializer {
 
 		FirstBloodHandler.register();
 
-		// === 1. КОМАНДА /newtarget (Для админов/тестов) ===
+		// === 1. КОМАНДА /newtarget ===
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			dispatcher.register(CommandManager.literal("newtarget")
 					.executes(context -> {
@@ -41,28 +41,35 @@ public class Calm_or_death implements ModInitializer {
 					}));
 		});
 
-		// === 2. КОМАНДА /contract (ДЛЯ ИГРОКОВ) ===
+		// === 2. КОМАНДА /contract ===
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			dispatcher.register(CommandManager.literal("contract")
 					.executes(context -> {
 						ServerPlayerEntity player = context.getSource().getPlayer();
 						if (player != null) {
-							// Показываем игроку инфо о его контракте
 							ContractManager.sendContractStatus(player);
 						}
 						return 1;
 					}));
 		});
 
-		// === 3. СООБЩЕНИЕ ПРИ ВХОДЕ ИГРОКА ===
+		// === 3. НОВАЯ КОМАНДА /airdrop ===
+		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+			dispatcher.register(CommandManager.literal("airdrop")
+					.executes(context -> {
+						// Вызываем спавн вручную
+						AirdropManager.spawnAirdrop(context.getSource().getServer());
+						return 1;
+					}));
+		});
+
+		// 4. СООБЩЕНИЕ ПРИ ВХОДЕ
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			ServerPlayerEntity player = handler.getPlayer();
-			// Делаем небольшую задержку, чтобы игрок успел прогрузиться и увидеть чат
-			// Но в простом варианте отправляем сразу
 			ContractManager.sendContractStatus(player);
 		});
 
-		// 4. ИНИЦИАЛИЗАЦИЯ ПРИ СТАРТЕ
+		// 5. ИНИЦИАЛИЗАЦИЯ
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			Scoreboard scoreboard = server.getScoreboard();
 			ScoreboardObjective objective = scoreboard.getNullableObjective(SCOREBOARD_ID);
@@ -80,14 +87,13 @@ public class Calm_or_death implements ModInitializer {
 			scoreboard.setObjectiveSlot(ScoreboardDisplaySlot.SIDEBAR, objective);
 		});
 
-		// 5. ТИКЕР (АЧИВКИ + КОНТРАКТЫ)
+		// 6. ТИКЕР
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
-
 			ContractManager.tick(server);
+			AirdropManager.tick(server);
 
 			if (server.getTicks() % 20 == 0) {
 				for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-					// Ачивки
 					checkRaceAdvancement(server, player, "minecraft:story/mine_stone", 10, "Каменный век");
 					checkRaceAdvancement(server, player, "minecraft:adventure/kill_a_mob", 15, "Охотник на монстров");
 					checkRaceAdvancement(server, player, "minecraft:story/enter_the_nether", 20, "Огненные недра");

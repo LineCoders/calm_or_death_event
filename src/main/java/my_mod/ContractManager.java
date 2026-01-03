@@ -188,5 +188,6 @@ public class ContractManager {
 
     public static void completeContract(MinecraftServer server, String teamName) {
         reRollContractForTeam(server, teamName, false);
+        AirdropManager.triggerOrResetTimer(server);
     }
 }
