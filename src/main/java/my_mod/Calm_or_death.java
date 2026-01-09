@@ -5,15 +5,12 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.minecraft.advancement.AdvancementEntry;
-import net.minecraft.advancement.AdvancementProgress;
 import net.minecraft.scoreboard.*;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
-import net.minecraft.util.Identifier;
+import me.lucko.fabric.api.permissions.v0.Permissions;
 
 public class Calm_or_death implements ModInitializer {
 	public static final String SCOREBOARD_ID = "event_points";
@@ -21,55 +18,22 @@ public class Calm_or_death implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		System.out.println("Мод Командного Ивента загружается!");
+
+		// 1. Регистрация
+		ModSounds.register();
 		ModItems.registerModItems();
 		LootTableModifier.registerModifications();
 		FirstBloodHandler.register();
+		AdvancementManager.register();
 
-		// === 1. КОМАНДА /newtarget ===
-		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-			dispatcher.register(CommandManager.literal("newtarget")
-					.executes(context -> {
-						ServerPlayerEntity player = context.getSource().getPlayer();
-						if (player != null) {
-							AbstractTeam team = player.getScoreboardTeam();
-							if (team != null) {
-								ContractManager.reRollContractForTeam(context.getSource().getServer(), team.getName(), false);
-								context.getSource().sendFeedback(() -> Text.literal("✅ Контракт обновлен принудительно!").formatted(Formatting.GREEN), false);
-							}
-						}
-						return 1;
-					}));
-		});
+		registerCommands();
 
-		// === 2. КОМАНДА /contract ===
-		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-			dispatcher.register(CommandManager.literal("contract")
-					.executes(context -> {
-						ServerPlayerEntity player = context.getSource().getPlayer();
-						if (player != null) {
-							ContractManager.sendContractStatus(player);
-						}
-						return 1;
-					}));
-		});
-
-		// === 3. НОВАЯ КОМАНДА /airdrop ===
-		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-			dispatcher.register(CommandManager.literal("airdrop")
-					.executes(context -> {
-						// Вызываем спавн вручную
-						AirdropManager.spawnAirdrop(context.getSource().getServer());
-						return 1;
-					}));
-		});
-
-		// 4. СООБЩЕНИЕ ПРИ ВХОДЕ
+		// 2. События
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			ServerPlayerEntity player = handler.getPlayer();
 			ContractManager.sendContractStatus(player);
 		});
 
-		// 5. ИНИЦИАЛИЗАЦИЯ
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			Scoreboard scoreboard = server.getScoreboard();
 			ScoreboardObjective objective = scoreboard.getNullableObjective(SCOREBOARD_ID);
@@ -85,64 +49,101 @@ public class Calm_or_death implements ModInitializer {
 				);
 			}
 			scoreboard.setObjectiveSlot(ScoreboardDisplaySlot.SIDEBAR, objective);
+
+			// === СКРЫТИЕ НИКОВ (ОПЦИЯ) ===
+			// Проходим по всем командам и отключаем отображение ников
+			for (Team team : scoreboard.getTeams()) {
+				// NEVER = вообще не показывать ники
+				// HIDE_FOR_OTHER_TEAMS = показывать только своим
+				team.setNameTagVisibilityRule(AbstractTeam.VisibilityRule.NEVER);
+			}
+			System.out.println("✅ [Calm_or_death] Ники скрыты для всех существующих команд.");
+
+			try {
+				server.getCommandManager().getDispatcher().execute("gamerule show_death_messages false", server.getCommandSource());
+				server.getCommandManager().getDispatcher().execute("gamerule show_advancement_messages false", server.getCommandSource());
+				System.out.println("✅ [Calm_or_death] Правила чата обновлены.");
+			} catch (Exception e) {
+				System.err.println("❌ Не удалось отключить анонсы: " + e.getMessage());
+			}
 		});
 
-		// 6. ТИКЕР
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			ContractManager.tick(server);
 			AirdropManager.tick(server);
+			AdvancementManager.tick(server);
 
-			if (server.getTicks() % 20 == 0) {
-				for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-					checkRaceAdvancement(server, player, "minecraft:story/mine_stone", 10, "Каменный век");
-					checkRaceAdvancement(server, player, "minecraft:adventure/kill_a_mob", 15, "Охотник на монстров");
-					checkRaceAdvancement(server, player, "minecraft:story/enter_the_nether", 20, "Огненные недра");
-					checkRaceAdvancement(server, player, "minecraft:end/kill_dragon", 100, "Освободи Энд");
+			// === ПОСТОЯННОЕ ПРИНУДИТЕЛЬНОЕ СКРЫТИЕ НИКОВ ===
+			// (На случай, если создали новую команду во время игры)
+			if (server.getTicks() % 1200 == 0) { // Раз в минуту (20 * 60)
+				for (Team team : server.getScoreboard().getTeams()) {
+					if (team.getNameTagVisibilityRule() != AbstractTeam.VisibilityRule.NEVER) {
+						team.setNameTagVisibilityRule(AbstractTeam.VisibilityRule.NEVER);
+					}
 				}
 			}
 		});
 	}
 
-	private void checkRaceAdvancement(MinecraftServer server, ServerPlayerEntity player, String advancementId, int points, String eventName) {
-		String[] parts = advancementId.split(":");
-		if (parts.length != 2) return;
+	private void registerCommands() {
+		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 
-		Identifier id = Identifier.of(parts[0], parts[1]);
-		AdvancementEntry advancement = server.getAdvancementLoader().get(id);
+			// === КОМАНДЫ ДЛЯ АДМИНОВ ===
 
-		if (advancement == null) return;
+			// /newtarget
+			dispatcher.register(CommandManager.literal("newtarget")
+					.requires(Permissions.require("calmordeath.command.newtarget", 3))
+					.executes(context -> {
+						ServerPlayerEntity player = context.getSource().getPlayer();
+						if (player != null && player.getScoreboardTeam() != null) {
+							ContractManager.reRollContractForTeam(context.getSource().getServer(), player.getScoreboardTeam().getName(), false);
+							context.getSource().sendFeedback(() -> Text.literal("✅ Контракт обновлен!").formatted(Formatting.GREEN), false);
+						} else {
+							context.getSource().sendError(Text.literal("Вы должны быть в команде!"));
+						}
+						return 1;
+					}));
 
-		AdvancementProgress progress = player.getAdvancementTracker().getProgress(advancement);
+			// /airdrop
+			dispatcher.register(CommandManager.literal("airdrop")
+					.requires(Permissions.require("calmordeath.command.airdrop", 3))
+					.executes(context -> {
+						AirdropManager.spawnAirdrop(context.getSource().getServer());
+						context.getSource().sendFeedback(() -> Text.literal("✈️ Аирдроп вызван принудительно!").formatted(Formatting.YELLOW), true);
+						return 1;
+					}));
 
-		if (progress.isDone()) {
-			String trackingName = "#done_" + id.getPath().replace("/", "_");
-			Scoreboard scoreboard = server.getScoreboard();
-			ScoreboardObjective objective = scoreboard.getNullableObjective(SCOREBOARD_ID);
-			if (objective == null) return;
+			// /hidenames (Принудительно скрыть ники прямо сейчас)
+			dispatcher.register(CommandManager.literal("hidenames")
+					.requires(Permissions.require("calmordeath.command.hidenames", 3))
+					.executes(context -> {
+						for (Team team : context.getSource().getServer().getScoreboard().getTeams()) {
+							team.setNameTagVisibilityRule(AbstractTeam.VisibilityRule.NEVER);
+						}
+						context.getSource().sendFeedback(() -> Text.literal("👻 Ники скрыты у всех команд!").formatted(Formatting.GRAY), true);
+						return 1;
+					}));
 
-			ScoreHolder trackerHolder = ScoreHolder.fromName(trackingName);
-			ScoreAccess trackerScore = scoreboard.getOrCreateScore(trackerHolder, objective);
 
-			if (trackerScore.getScore() > 0) return;
+			// === КОМАНДЫ ДЛЯ ИГРОКОВ ===
 
-			AbstractTeam team = player.getScoreboardTeam();
-			if (team != null) {
-				trackerScore.setScore(1);
-				String teamName = team.getName();
-				ScoreHolder teamHolder = ScoreHolder.fromName(teamName);
-				ScoreAccess teamScore = scoreboard.getOrCreateScore(teamHolder, objective);
-				teamScore.setScore(teamScore.getScore() + points);
+			// /contract
+			dispatcher.register(CommandManager.literal("contract")
+					.executes(context -> {
+						ServerPlayerEntity player = context.getSource().getPlayer();
+						if (player != null) ContractManager.sendContractStatus(player);
+						return 1;
+					}));
 
-				server.getPlayerManager().broadcast(
-						Text.literal("Команда ").formatted(Formatting.GRAY)
-								.append(Text.literal(teamName).formatted(Formatting.GOLD))
-								.append(Text.literal(" выполнила достижение ").formatted(Formatting.GRAY))
-								.append(Text.literal("\"" + eventName + "\"").formatted(Formatting.GOLD))
-								.append(Text.literal(" и получила ").formatted(Formatting.GRAY))
-								.append(Text.literal(points + " очков!").formatted(Formatting.GOLD)),
-						false
-				);
-			}
-		}
+			// /cooldowns
+			dispatcher.register(CommandManager.literal("cooldowns")
+					.executes(context -> {
+						ServerPlayerEntity player = context.getSource().getPlayer();
+						if (player != null) {
+							AntiAbuseHandler.sendCooldownStatus(player);
+						}
+						return 1;
+					}));
+		});
 	}
 }

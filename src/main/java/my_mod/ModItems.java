@@ -13,15 +13,15 @@ public class ModItems {
 
     // 1. Руна на 50 очков
     public static final Item RUNE_50 = registerItem("rune_50", settings ->
-            new PointRuneItem(settings, 50));
+            new PointRuneItem(settings, 10));
 
     // 2. Руна на 75 очков
     public static final Item RUNE_75 = registerItem("rune_75", settings ->
-            new PointRuneItem(settings, 75));
+            new PointRuneItem(settings, 25));
 
     // 3. Руна на 100 очков
     public static final Item RUNE_100 = registerItem("rune_100", settings ->
-            new PointRuneItem(settings, 100));
+            new PointRuneItem(settings, 50));
 
 
     // Вспомогательный метод, который делает всю грязную работу за нас

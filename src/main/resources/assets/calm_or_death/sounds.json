@@ -1,0 +1,12 @@
+{
+  "s.killplayer": {
+    "category": "player",
+    "subtitle": "subtitles.calm_or_death.killplayer",
+    "sounds": [
+      {
+        "name": "calm_or_death:first_blood",
+        "stream": true
+      }
+    ]
+  }
+}
