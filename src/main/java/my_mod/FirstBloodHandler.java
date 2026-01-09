@@ -29,25 +29,46 @@ public class FirstBloodHandler {
                 if (objective == null) return;
 
                 AbstractTeam victimTeam = victim.getScoreboardTeam();
+                ServerPlayerEntity killer = null;
 
-                // === 0. РАСЧЕТ СТОИМОСТИ ГОЛОВЫ ===
-                // Определяем, сколько очков стоит смерть игрока из этой команды
-                int pointValue = 5; // По умолчанию (для команд ниже 5 места)
+                // === 1. ПРОВЕРКА УБИЙЦЫ И КУЛДАУНОВ ===
+                // Мы проверяем это ДО того, как списать очки у жертвы.
+                if (source.getAttacker() instanceof ServerPlayerEntity pKiller) {
+                    killer = pKiller;
+                    AbstractTeam killerTeam = killer.getScoreboardTeam();
+
+                    // А) Проверка на огонь по своим
+                    if (killerTeam != null && victimTeam != null && killerTeam.isEqual(victimTeam)) {
+                        killer.sendMessage(Text.literal("Огонь по своим запрещен!").formatted(Formatting.RED), true);
+                        return; // Выходим: никто не теряет и не получает очки
+                    }
+
+                    // Б) Проверка на Абуз (Кулдаун)
+                    // Метод вернет false, если кулдаун активен.
+                    // В этом случае мы выходим, и жертва НЕ теряет очки.
+                    if (!AntiAbuseHandler.checkAndApplyCooldown(killer, victim)) {
+                        return;
+                    }
+                }
+
+                // Если мы дошли сюда -> Кулдауна нет (или смерть от моба).
+                // Можно начислять штрафы и награды.
+
+                // === 2. РАСЧЕТ СТОИМОСТИ ГОЛОВЫ ===
+                int pointValue = 5;
                 if (victimTeam != null) {
                     pointValue = calculatePointValue(scoreboard, objective, victimTeam.getName());
                 }
 
-                // === ЧАСТЬ 1: ШТРАФ ЗА СМЕРТЬ (Зависит от топа) ===
+                // === 3. ШТРАФ ЗА СМЕРТЬ (Жертва теряет очки) ===
                 if (victimTeam != null) {
                     String vTeamName = victimTeam.getName();
                     ScoreHolder vHolder = ScoreHolder.fromName(vTeamName);
                     ScoreAccess vScore = scoreboard.getOrCreateScore(vHolder, objective);
 
                     int currentScore = vScore.getScore();
-                    // Вычитаем рассчитанное значение, но не уходим ниже нуля
                     vScore.setScore(Math.max(0, currentScore - pointValue));
 
-                    // Сообщение зависит от размера штрафа
                     if (pointValue > 20) {
                         victim.sendMessage(Text.literal("Ваша команда в топе! Штраф за смерть повышен: -" + pointValue).formatted(Formatting.RED, Formatting.BOLD), false);
                     } else {
@@ -55,23 +76,12 @@ public class FirstBloodHandler {
                     }
                 }
 
-                // === ЧАСТЬ 2: НАГРАДА ЗА УБИЙСТВО ===
-                if (source.getAttacker() instanceof ServerPlayerEntity killer) {
+                // === 4. НАГРАДА ЗА УБИЙСТВО (Убийца получает очки) ===
+                if (killer != null) {
                     AbstractTeam killerTeam = killer.getScoreboardTeam();
 
                     if (killerTeam != null) {
-                        if (killerTeam.isEqual(victimTeam)) {
-                            killer.sendMessage(Text.literal("Огонь по своим запрещен!").formatted(Formatting.RED), true);
-                            return;
-                        }
-
-                        // === ЗАЩИТА ОТ АБУЗА (Если включена) ===
-                        // if (!AntiAbuseHandler.checkAndApplyCooldown(killer, victim)) {
-                        //    return;
-                        // }
-
                         String kTeamName = killerTeam.getName();
-                        // Передаем server, как договаривались
                         boolean isContractKill = ContractManager.isTarget(server, kTeamName, victim.getUuid());
                         ScoreHolder kHolder = ScoreHolder.fromName(kTeamName);
                         ScoreAccess kScore = scoreboard.getOrCreateScore(kHolder, objective);
@@ -88,7 +98,7 @@ public class FirstBloodHandler {
                         }
 
                         if (isContractKill) {
-                            // === КОНТРАКТ (Не меняем, фиксированно 200) ===
+                            // Награда за контракт
                             kScore.setScore(kScore.getScore() + 200);
 
                             server.getPlayerManager().broadcast(
@@ -101,8 +111,7 @@ public class FirstBloodHandler {
                             ContractManager.completeContract(server, kTeamName);
 
                         } else {
-                            // === ОБЫЧНОЕ УБИЙСТВО (Динамическая награда) ===
-                            // Награда равна тому, сколько потеряла жертва (pointValue)
+                            // Обычное убийство
                             kScore.setScore(kScore.getScore() + pointValue);
 
                             server.getPlayerManager().broadcast(
@@ -116,7 +125,7 @@ public class FirstBloodHandler {
                         }
                     }
 
-                    // Звук
+                    // Звук убийства
                     server.getPlayerManager().getPlayerList().forEach(p -> {
                         p.playSound(ModSounds.KILL_PLAYER_EVENT, 1.0f, 1.0f);
                     });
@@ -125,34 +134,29 @@ public class FirstBloodHandler {
         });
     }
 
-    // === ВСПОМОГАТЕЛЬНЫЙ МЕТОД: РАСЧЕТ ОЧКОВ ПО РАНГУ ===
+    // Вспомогательный метод (без изменений)
     private static int calculatePointValue(Scoreboard scoreboard, ScoreboardObjective objective, String targetTeamName) {
-        // 1. Берем все команды
         List<Team> allTeams = new ArrayList<>(scoreboard.getTeams());
-
-        // 2. Сортируем их по очкам (от большего к меньшему)
         allTeams.sort((t1, t2) -> {
             int score1 = scoreboard.getOrCreateScore(ScoreHolder.fromName(t1.getName()), objective).getScore();
             int score2 = scoreboard.getOrCreateScore(ScoreHolder.fromName(t2.getName()), objective).getScore();
-            return Integer.compare(score2, score1); // reverse sort
+            return Integer.compare(score2, score1);
         });
 
-        // 3. Ищем, на каком месте наша жертва
         int rank = -1;
         for (int i = 0; i < allTeams.size(); i++) {
             if (allTeams.get(i).getName().equals(targetTeamName)) {
-                rank = i + 1; // +1, так как индекс начинается с 0
+                rank = i + 1;
                 break;
             }
         }
 
-        // 4. Выдаем очки в зависимости от места
-        if (rank == 1) return 100; // Топ 1
-        if (rank == 2) return 75;  // Топ 2
-        if (rank == 3) return 50;  // Топ 3
-        if (rank == 4) return 25;  // Топ 4
-        if (rank == 5) return 10;  // Топ 5
+        if (rank == 1) return 100;
+        if (rank == 2) return 75;
+        if (rank == 3) return 50;
+        if (rank == 4) return 25;
+        if (rank == 5) return 10;
 
-        return 5; // Топ 6, 7, 8 и все остальные
+        return 5;
     }
 }

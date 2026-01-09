@@ -51,10 +51,7 @@ public class Calm_or_death implements ModInitializer {
 			scoreboard.setObjectiveSlot(ScoreboardDisplaySlot.SIDEBAR, objective);
 
 			// === СКРЫТИЕ НИКОВ (ОПЦИЯ) ===
-			// Проходим по всем командам и отключаем отображение ников
 			for (Team team : scoreboard.getTeams()) {
-				// NEVER = вообще не показывать ники
-				// HIDE_FOR_OTHER_TEAMS = показывать только своим
 				team.setNameTagVisibilityRule(AbstractTeam.VisibilityRule.NEVER);
 			}
 			System.out.println("✅ [Calm_or_death] Ники скрыты для всех существующих команд.");
@@ -74,7 +71,6 @@ public class Calm_or_death implements ModInitializer {
 			AdvancementManager.tick(server);
 
 			// === ПОСТОЯННОЕ ПРИНУДИТЕЛЬНОЕ СКРЫТИЕ НИКОВ ===
-			// (На случай, если создали новую команду во время игры)
 			if (server.getTicks() % 1200 == 0) { // Раз в минуту (20 * 60)
 				for (Team team : server.getScoreboard().getTeams()) {
 					if (team.getNameTagVisibilityRule() != AbstractTeam.VisibilityRule.NEVER) {
@@ -90,16 +86,15 @@ public class Calm_or_death implements ModInitializer {
 
 			// === КОМАНДЫ ДЛЯ АДМИНОВ ===
 
-			// /newtarget
-			dispatcher.register(CommandManager.literal("newtarget")
+			// /admin_newtarget (Для админов, бесплатно меняет контракт любой команде, если нужно)
+			// Я оставил это на случай тестов, но переименовал, чтобы не конфликтовать
+			dispatcher.register(CommandManager.literal("admin_newtarget")
 					.requires(Permissions.require("calmordeath.command.newtarget", 3))
 					.executes(context -> {
 						ServerPlayerEntity player = context.getSource().getPlayer();
 						if (player != null && player.getScoreboardTeam() != null) {
 							ContractManager.reRollContractForTeam(context.getSource().getServer(), player.getScoreboardTeam().getName(), false);
-							context.getSource().sendFeedback(() -> Text.literal("✅ Контракт обновлен!").formatted(Formatting.GREEN), false);
-						} else {
-							context.getSource().sendError(Text.literal("Вы должны быть в команде!"));
+							context.getSource().sendFeedback(() -> Text.literal("✅ Контракт обновлен админом!").formatted(Formatting.GREEN), false);
 						}
 						return 1;
 					}));
@@ -113,7 +108,7 @@ public class Calm_or_death implements ModInitializer {
 						return 1;
 					}));
 
-			// /hidenames (Принудительно скрыть ники прямо сейчас)
+			// /hidenames
 			dispatcher.register(CommandManager.literal("hidenames")
 					.requires(Permissions.require("calmordeath.command.hidenames", 3))
 					.executes(context -> {
@@ -126,6 +121,48 @@ public class Calm_or_death implements ModInitializer {
 
 
 			// === КОМАНДЫ ДЛЯ ИГРОКОВ ===
+
+			// /newtarget (ПЛАТНАЯ СМЕНА КОНТРАКТА)
+			dispatcher.register(CommandManager.literal("newtarget")
+					.executes(context -> {
+						ServerPlayerEntity player = context.getSource().getPlayer();
+						if (player == null) return 0;
+
+						Team team = player.getScoreboardTeam();
+						if (team == null) {
+							context.getSource().sendError(Text.literal("❌ Вы должны быть в команде!"));
+							return 0;
+						}
+
+						Scoreboard scoreboard = context.getSource().getServer().getScoreboard();
+						ScoreboardObjective objective = scoreboard.getNullableObjective(SCOREBOARD_ID);
+
+						if (objective == null) {
+							context.getSource().sendError(Text.literal("❌ Система очков не активна."));
+							return 0;
+						}
+
+						// Получаем доступ к счету команды
+						ScoreHolder holder = ScoreHolder.fromName(team.getName());
+						ScoreAccess scoreAccess = scoreboard.getOrCreateScore(holder, objective);
+						int currentScore = scoreAccess.getScore();
+
+						// Проверка баланса
+						if (currentScore < 50) {
+							context.getSource().sendError(Text.literal("❌ Недостаточно баллов! Нужно 50, у вас: " + currentScore).formatted(Formatting.RED));
+							return 0;
+						}
+
+						// Списание и выполнение
+						scoreAccess.setScore(currentScore - 50);
+						ContractManager.reRollContractForTeam(context.getSource().getServer(), team.getName(), false);
+
+						// Сообщение игроку (остальным напишет метод reRoll)
+						context.getSource().sendFeedback(() ->
+								Text.literal("💸 Списано 50 баллов за смену контракта.").formatted(Formatting.GOLD), false);
+
+						return 1;
+					}));
 
 			// /contract
 			dispatcher.register(CommandManager.literal("contract")

@@ -11,6 +11,7 @@ import net.minecraft.scoreboard.Team;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory; // Можно убрать, если не используется, но пусть будет
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -21,11 +22,14 @@ public class ContractManager {
 
     private static final int HOUR_IN_TICKS = 72000;
     private static final int TEN_MINUTES_IN_TICKS = 12000;
+    // 15 минут = 18000 тиков
+    private static final int COORD_ANNOUNCE_INTERVAL = 18000;
 
     private static int checkCycle = 0;
 
     public static void tick(MinecraftServer server) {
         checkCycle++;
+        int serverTicks = server.getTicks();
 
         ContractState state = ContractState.getServerState(server);
         boolean dirty = false;
@@ -43,7 +47,7 @@ public class ContractManager {
             }
         }
 
-        // 2. ПРОВЕРКА "ВСЕГДА ДОЛЖЕН БЫТЬ КОНТРАКТ"
+        // 2. ПРОВЕРКА КОНТРАКТОВ
         if (checkCycle % 100 == 0) {
             for (Team team : server.getScoreboard().getTeams()) {
                 String tName = team.getName();
@@ -63,7 +67,82 @@ public class ContractManager {
             validateContracts(server);
         }
 
+        // 5. ДАТЧИК СЕРДЦЕБИЕНИЯ (Раз в 1 секунду)
+        if (serverTicks % 20 == 0) {
+            handleHeartbeat(server, state);
+        }
+
+        // 6. КООРДИНАТЫ РАЗ В 15 МИНУТ
+        if (serverTicks % COORD_ANNOUNCE_INTERVAL == 0) {
+            announceApproximateCoords(server, state);
+        }
+
         if (dirty) state.markDirty();
+    }
+
+    // === ИСПРАВЛЕННЫЙ МЕТОД СЕРДЦЕБИЕНИЯ ===
+    private static void handleHeartbeat(MinecraftServer server, ContractState state) {
+        for (Map.Entry<String, UUID> entry : state.teamContracts.entrySet()) {
+            String teamName = entry.getKey();
+            UUID targetId = entry.getValue();
+
+            ServerPlayerEntity target = server.getPlayerManager().getPlayer(targetId);
+            if (target == null) continue;
+
+            Team team = server.getScoreboard().getTeam(teamName);
+            if (team == null) continue;
+
+            for (String memberName : team.getPlayerList()) {
+                ServerPlayerEntity hunter = server.getPlayerManager().getPlayer(memberName);
+
+                // ИСПРАВЛЕНО: используем getEntityWorld()
+                if (hunter != null && hunter.isAlive() && hunter.getEntityWorld() == target.getEntityWorld()) {
+                    double distance = hunter.distanceTo(target);
+
+                    if (distance < 100) {
+                        float pitch = 2.0f - (float) (distance / 100.0) * 1.5f;
+
+                        // ИСПРАВЛЕНО: убран аргумент SoundCategory, так как метод игрока его не принимает
+                        hunter.getEntityWorld().playSound(null, hunter.getX(), hunter.getY(), hunter.getZ(), SoundEvents.ENTITY_WARDEN_HEARTBEAT, SoundCategory.PLAYERS, 1.0f, 1.0f);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void announceApproximateCoords(MinecraftServer server, ContractState state) {
+        server.getPlayerManager().broadcast(Text.literal("📡 Спутниковое сканирование местности...").formatted(Formatting.AQUA), false);
+
+        for (Map.Entry<String, UUID> entry : state.teamContracts.entrySet()) {
+            String teamName = entry.getKey();
+            UUID targetId = entry.getValue();
+
+            Team team = server.getScoreboard().getTeam(teamName);
+            if (team == null) continue;
+
+            ServerPlayerEntity target = server.getPlayerManager().getPlayer(targetId);
+
+            Text message;
+            if (target == null) {
+                message = Text.literal("❌ Сигнал цели потерян (Оффлайн).").formatted(Formatting.GRAY);
+            } else {
+                int step = 250;
+                int x = target.getBlockX();
+                int z = target.getBlockZ();
+
+                int minX = (int) Math.floor((double) x / step) * step;
+                int maxX = minX + step;
+
+                int minZ = (int) Math.floor((double) z / step) * step;
+                int maxZ = minZ + step;
+
+                message = Text.literal("📍 Цель в квадрате: ")
+                        .formatted(Formatting.GOLD)
+                        .append(Text.literal(String.format("X: [%d .. %d], Z: [%d .. %d]", minX, maxX, minZ, maxZ))
+                                .formatted(Formatting.YELLOW));
+            }
+            broadcastToTeam(server, team, message);
+        }
     }
 
     private static void validateContracts(MinecraftServer server) {
@@ -88,15 +167,14 @@ public class ContractManager {
         Team team = server.getScoreboard().getTeam(teamName);
         if (team == null) return;
 
+        UUID previousTargetUUID = state.teamContracts.get(teamName);
         List<ServerPlayerEntity> potentialTargets = new ArrayList<>();
 
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-            if (team.getPlayerList().contains(player.getName().getString())) {
-                continue;
-            }
-            if (AntiAbuseHandler.isCoolingDown(server, teamName, player.getUuid())) {
-                continue;
-            }
+            if (team.getPlayerList().contains(player.getName().getString())) continue;
+            if (AntiAbuseHandler.isCoolingDown(server, teamName, player.getUuid())) continue;
+            if (previousTargetUUID != null && player.getUuid().equals(previousTargetUUID)) continue;
+
             potentialTargets.add(player);
         }
 
@@ -105,13 +183,12 @@ public class ContractManager {
                 state.teamContracts.remove(teamName);
                 state.teamTimers.remove(teamName);
                 state.markDirty();
-                broadcastToTeam(server, team, Text.literal("⚠ Нет доступных целей (все в кулдауне или оффлайн). Ожидание...").formatted(Formatting.YELLOW));
+                broadcastToTeam(server, team, Text.literal("⚠ Нет доступных новых целей. Поиск...").formatted(Formatting.YELLOW));
             }
             return;
         }
 
         ServerPlayerEntity newTarget = potentialTargets.get(new Random().nextInt(potentialTargets.size()));
-
         state.teamContracts.put(teamName, newTarget.getUuid());
         state.teamTimers.put(teamName, HOUR_IN_TICKS);
         state.offlineSince.remove(newTarget.getUuid());
@@ -127,9 +204,9 @@ public class ContractManager {
 
         if (newTarget != null) {
             newTarget.sendMessage(Text.literal("Кажется, за мной следят...").formatted(Formatting.GRAY), true);
-            newTarget.getEntityWorld().playSound(null, newTarget.getX(), newTarget.getY(), newTarget.getZ(), SoundEvents.ENTITY_ELDER_GUARDIAN_CURSE, net.minecraft.sound.SoundCategory.PLAYERS, 1.0f, 1.0f);
+            // Исправлен метод звука для мира:
+            newTarget.getEntityWorld().playSound(null, newTarget.getX(), newTarget.getY(), newTarget.getZ(), SoundEvents.ENTITY_ELDER_GUARDIAN_CURSE, SoundCategory.PLAYERS, 1.0f, 1.0f);
             newTarget.addStatusEffect(new StatusEffectInstance(StatusEffects.DARKNESS, 60, 0, false, false, false));
-
             giveTargetHeadToTeam(server, team, newTarget);
         }
     }
@@ -138,10 +215,7 @@ public class ContractManager {
         ItemStack head = new ItemStack(Items.PLAYER_HEAD);
         ProfileComponent profile = ProfileComponent.ofStatic(target.getGameProfile());
         head.set(DataComponentTypes.PROFILE, profile);
-
-        head.set(DataComponentTypes.CUSTOM_NAME,
-                Text.literal("Голова цели: " + target.getName().getString())
-                        .formatted(Formatting.RED));
+        head.set(DataComponentTypes.CUSTOM_NAME, Text.literal("Голова цели: " + target.getName().getString()).formatted(Formatting.RED));
 
         for (String memberName : team.getPlayerList()) {
             ServerPlayerEntity member = server.getPlayerManager().getPlayer(memberName);
@@ -171,10 +245,8 @@ public class ContractManager {
             return;
         }
 
-        // БЕЗОПАСНОЕ ПОЛУЧЕНИЕ СЕРВЕРА
         if (!(player.getEntityWorld() instanceof ServerWorld serverWorld)) return;
         MinecraftServer server = serverWorld.getServer();
-
         ContractState state = ContractState.getServerState(server);
 
         String teamName = team.getName();
@@ -192,7 +264,6 @@ public class ContractManager {
         if (targetPlayer != null) {
             targetName = targetPlayer.getName().getString();
         } else {
-            // УБРАЛИ ПОЛУЧЕНИЕ ИЗ КЭША, ЧТОБЫ ИЗБЕЖАТЬ ОШИБОК
             targetName = "Цель оффлайн";
         }
 
@@ -210,10 +281,8 @@ public class ContractManager {
 
     private static void checkOfflineTargets(MinecraftServer server) {
         ContractState state = ContractState.getServerState(server);
-
         for (String teamName : new HashSet<>(state.teamContracts.keySet())) {
             UUID targetUUID = state.teamContracts.get(teamName);
-
             if (server.getPlayerManager().getPlayer(targetUUID) != null) {
                 state.offlineSince.remove(targetUUID);
                 state.markDirty();
@@ -221,7 +290,6 @@ public class ContractManager {
                 long currentTime = server.getOverworld().getTime();
                 state.offlineSince.putIfAbsent(targetUUID, currentTime);
                 state.markDirty();
-
                 if (currentTime - state.offlineSince.get(targetUUID) > TEN_MINUTES_IN_TICKS) {
                     broadcastToTeam(server, server.getScoreboard().getTeam(teamName),
                             Text.literal("⚠ Цель долго отсутствует. Смена контракта...").formatted(Formatting.YELLOW));
